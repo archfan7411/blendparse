@@ -6,7 +6,40 @@ import io
 class Blendfile(io.FileIO):
     def __init__(self, filename):
         super().__init__(filename, "rb")
+        # Offset of first file block header.
+        self._block_start = 12
         self.read_header()
+        # Offsets of each file block by code.
+        self._block_offsets = self._read_block_offsets()
+        
+        # Looping through file block headers to find scene header
+        for block_code, offset in self._block_offsets.items():
+            if block_code.startswith("SC"):
+                print(f"Found scene block at offset {offset}!")
+
+    def _read_block_offsets(self):
+        """
+        Cache the offset to each file block.
+        """
+
+        block_offsets = {}
+        self.seek(self._block_start)
+        while True:
+            # File block code; identifies type of data
+            block_code = self.read(4).decode("utf-8")
+            # Empty string indicates EOF.
+            if block_code == "":
+                break
+            block_offsets[block_code] = self.tell()
+            # Size of file block, after this header
+            block_size = int.from_bytes(self.read(4), self.endianness)
+            
+            # Skip rest of file header.
+            self.seek(self.pointer_size + 8, io.SEEK_CUR)
+            # Skip to next file block.
+            self.seek(block_size, io.SEEK_CUR)
+
+        return block_offsets
 
     def read_header(self):
         self.seek(0)
@@ -22,26 +55,3 @@ class Blendfile(io.FileIO):
 
         # Blender version, 3-byte int; v2.93 is represented as 293, and so on
         self.version = int(self.read(3))
-
-        # Looping through file block headers to find scene header
-        # TODO: Implement proper error handling if the target file block does not exist.
-        while True:
-
-            # File block code; identifies type of data
-            code = self.read(4).decode("utf-8")
-
-            # Size of file block, after this header
-            size = int.from_bytes(self.read(4), self.endianness)
-
-            # Seeking to end of file block header
-            self.seek(8+self.pointer_size+size, 1)
-
-            # Scene file block codes will always begin with "SC"
-            if code.startswith("SC"):
-                # TODO: Acquire SDNA index of scene data, to be found in DNA1 file block
-                # SDNA index occurs directly following file block size in header
-                # and is pointer_size bytes long
-                break
-
-            # Seeking to the start of the next file block
-            self.seek(8+self.pointer_size+size, 1)

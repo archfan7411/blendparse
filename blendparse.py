@@ -20,12 +20,13 @@ class Blendfile(io.FileIO):
         block_offsets = {}
         self.seek(self._block_start)
         while True:
+            offset = self.tell()
             # File block code; identifies type of data
             block_code = self.read(4).decode("utf-8")
             # Empty string indicates EOF.
             if block_code == "":
                 break
-            block_offsets[block_code] = self.tell()
+            block_offsets[block_code] = offset
             # Size of file block, after this header
             block_size = int.from_bytes(self.read(4), self.endianness)
 
@@ -80,7 +81,7 @@ class Blendfile(io.FileIO):
             def load_block():
                 return self._load_block(at_offset)
             return load_block
-                
+
         matched_blocks = {}
         for identifier, offset in self._block_offsets.items():
             if identifier.startswith(match):
@@ -98,15 +99,14 @@ class Blendfile(io.FileIO):
         # I'm leaving this here to be explicit. XD
         if self.closed:
             raise ValueError("I/O operation on a closed file.")
-            
+
         # Grab SDNA index and struct count from file block header.
-        
         self.seek(offset + 4 + 4 + self.pointer_size)
         sdna_index = int.from_bytes(self.read(4), self.endianness)
         count = int.from_bytes(self.read(4), self.endianness)
 
         sdna_struct = self._load_sdna(sdna_index)
-        
+
         # TODO load structs according to SDNA.
         for _ in range(count):
             translated = {}

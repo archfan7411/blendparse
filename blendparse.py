@@ -11,11 +11,6 @@ class Blendfile(io.FileIO):
         self.read_header()
         # Offsets of each file block by code.
         self._block_offsets = self._read_block_offsets()
-        
-        # Looping through file block headers to find scene header
-        for block_code, offset in self._block_offsets.items():
-            if block_code.startswith("SC"):
-                print(f"Found scene block at offset {offset}!")
 
     def _read_block_offsets(self):
         """
@@ -33,13 +28,26 @@ class Blendfile(io.FileIO):
             block_offsets[block_code] = self.tell()
             # Size of file block, after this header
             block_size = int.from_bytes(self.read(4), self.endianness)
-            
+
             # Skip rest of file header.
             self.seek(self.pointer_size + 8, io.SEEK_CUR)
             # Skip to next file block.
             self.seek(block_size, io.SEEK_CUR)
 
         return block_offsets
+
+    def _read_sdna_indexes(self):
+        """
+        Cache the index and offset of each SDNA structure name.
+        """
+        pass
+
+    def _load_sdna(self, sdna_index):
+        """
+        Load an SDNA struct as a dict describing the structures.
+        """
+        # We could consider caching recently loaded SDNA structs.
+        pass
 
     def read_header(self):
         self.seek(0)
@@ -55,3 +63,51 @@ class Blendfile(io.FileIO):
 
         # Blender version, 3-byte int; v2.93 is represented as 293, and so on
         self.version = int(self.read(3))
+
+    def get_blocks(self, match=""):
+        """
+        Get file blocks from the blend file.
+
+        To be efficient, functions that load the file blocks will be returned.
+
+        :param match: Filter file blocks by matching the beginning of the name
+        against a string. Default is "" (matches everything). Case sensitive.
+        :return A dictionary mapping identifiers to a function to load the
+        block.
+        """
+        # Invoking the load_block() closure will load the file block at offset.
+        def create_loader(at_offset):
+            def load_block():
+                return self._load_block(at_offset)
+            return load_block
+                
+        matched_blocks = {}
+        for identifier, offset in self._block_offsets.items():
+            if identifier.startswith(match):
+                matched_blocks[identifier] = create_loader(offset)
+        return matched_blocks
+
+    def _load_block(self, offset):
+        """
+        Load a file block at a given offset to the beginning of the blend file.
+
+        :param offset: The offset of the file block.
+        :return Generator that yields dictionaries, each representing a struct.
+        """
+        # We might allow loading cached blocks after the file is closed, so
+        # I'm leaving this here to be explicit. XD
+        if self.closed:
+            raise ValueError("I/O operation on a closed file.")
+            
+        # Grab SDNA index and struct count from file block header.
+        
+        self.seek(offset + 4 + 4 + self.pointer_size)
+        sdna_index = int.from_bytes(self.read(4), self.endianness)
+        count = int.from_bytes(self.read(4), self.endianness)
+
+        sdna_struct = self._load_sdna(sdna_index)
+        
+        # TODO load structs according to SDNA.
+        for _ in range(count):
+            translated = {}
+            yield translated

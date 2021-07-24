@@ -1,6 +1,8 @@
 # A purpose-built class to parse certain information from .blend files.
 
+import json
 import io
+import re
 
 class BlendStruct:
     """
@@ -34,6 +36,12 @@ class BlendStruct:
         else:
             return str(self._structure)
 
+    def __repr__(self):
+        if self._structure is None:
+            return f"<Blender Structure {self._type} (unloaded)>"
+        else:
+            return f"<Blender Structure {self._type} (loaded)>"
+
     def __getitem__(self, item):
         if self._structure is None:
             self._structure = self._load_cb()
@@ -42,7 +50,18 @@ class BlendStruct:
     def __iter__(self):
         if self._structure is None:
             self._structure = self._load_cb()
-        return self._structure
+        return self._structure.__iter__()
+
+    def inspect(self):
+        """
+        Return a human readable representation of the struct.
+        """
+        summary = {}
+        if self._structure is None:
+            self._structure = self._load_cb()
+        for field, value in self._structure.items():
+            summary[field] = repr(value)
+        return json.dumps(summary, indent=4)
 
 # A class for opening and reading data from .blend files
 class Blendfile(io.FileIO):
@@ -67,6 +86,39 @@ class Blendfile(io.FileIO):
             if char == null_char:
                 return res.decode("utf-8")
             res += char
+
+    def _construct_value(self, type, is_ptr, length):
+        """
+        Construct a value from a type.
+        
+        This is gonna be messy; documentation can come later.
+        """
+        if length > 1:
+            arr = []
+            # Skip for now.
+            size = self._sdna["tlen"][type]
+            for _ in range(length):
+                self.seek(size, io.SEEK_CUR)
+                #arr.append(self._construct_value(type, False, 1))
+            return arr
+
+        INT_TYPES = ("short", "int", "long", "long long")
+        if type in self._sdna["structs"]:
+            offset = self.tell()
+            self.seek(self._sdna["tlen"][type], io.SEEK_CUR)
+            return BlendStruct(self._struct_loader(type, offset), type)
+        elif type in INT_TYPES:
+            size = self._sdna["tlen"][type]
+            return int.from_bytes(self.read(size), self.endianness)
+        elif type == "char":
+            if is_ptr:
+                return self._read_c_string()
+            else:
+                return self.read(1)
+        else:
+            size = self._sdna["tlen"][type]
+            self.seek(size, io.SEEK_CUR)
+            return type
 
     def _read_block_offsets(self):
         """
@@ -146,9 +198,10 @@ class Blendfile(io.FileIO):
         # Type length identifier; should be "TLEN"
         len_identifier = self.read(4).decode("utf-8")
         assert(len_identifier == "TLEN")
-        type_lengths = []
-        for _ in range(total_types):
-            type_lengths.append(int.from_bytes(self.read(2), self.endianness))
+        type_lengths = {}
+        for i in range(total_types):
+            length = int.from_bytes(self.read(2), self.endianness)
+            type_lengths[_types[i]] = length
         sdna["tlen"] = type_lengths
 
         # Align at 4 bytes.
@@ -185,8 +238,19 @@ class Blendfile(io.FileIO):
         :param offset: The byte offset at which to begin loading.
         :return The loaded structure.
         """
+        structure = {}
         fields = self._sdna["structs"][struct_name]
-        return {}
+        for name, type in fields.items():
+            lengths = re.findall(r"\[([0-9]+)\]", name)
+            if len(lengths) > 1:
+                raise ValueError(f"Can't handle nested array {name}.")
+            elif len(lengths) == 1:
+                length = int(lengths[0])
+            else:
+                length = 1
+            is_ptr = name.startswith("*")
+            structure[name] = self._construct_value(type, is_ptr, length)
+        return structure
 
     def read_header(self):
         self.seek(0)
@@ -226,6 +290,12 @@ class Blendfile(io.FileIO):
                 matched_blocks[identifier] = create_loader(offset)
         return matched_blocks
 
+    # Helper for creating a callback to load a given structure.
+    def _struct_loader(self, name, at_offset):
+        def load_struct():
+            return self._load_struct(name, at_offset)
+        return load_struct
+
     def _load_block(self, offset):
         """
         Load a file block at a given offset to the beginning of the blend file.
@@ -243,13 +313,7 @@ class Blendfile(io.FileIO):
         sdna_index = int.from_bytes(self.read(4), self.endianness)
         count = int.from_bytes(self.read(4), self.endianness)
 
-        # Helper for creating a callback to load a given structure.
-        def create_loader(name, at_offset):
-            def load_struct():
-                return self._load_struct(name, at_offset)
-            return load_struct
-
         # The type of the structure.
         name = list(self._sdna["structs"])[sdna_index]
         for _ in range(count):
-            yield BlendStruct(create_loader(name, self.tell()), name)
+            yield BlendStruct(self._struct_loader(name, self.tell()), name)

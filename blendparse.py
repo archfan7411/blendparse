@@ -2,6 +2,48 @@
 
 import io
 
+class BlendStruct:
+    """
+    Read-only dict-like datatype representing a structure in a .blend file.
+    """
+
+    def __init__(self, load_cb, type):
+        """
+        Initialize the BlendStruct.
+
+        :param load_cb: A callback to load the structure.
+        :param type: The type of the structure.
+        """
+        self._load_cb = load_cb
+        self._type = type
+        self._structure = None
+
+    def load(self):
+        """
+        Force the structure to be loaded.
+
+        :return The loaded blend struct (self)
+        """
+        if self._structure is None:
+            self._structure = self._load_cb()
+        return self
+
+    def __str__(self):
+        if self._structure is None:
+            return f"<Blender Structure {self._type} (unloaded)>"
+        else:
+            return str(self._structure)
+
+    def __getitem__(self, item):
+        if self._structure is None:
+            self._structure = self._load_cb()
+        return self._structure[item]
+
+    def __iter__(self):
+        if self._structure is None:
+            self._structure = self._load_cb()
+        return self._structure
+
 # A class for opening and reading data from .blend files
 class Blendfile(io.FileIO):
     def __init__(self, filename):
@@ -135,12 +177,15 @@ class Blendfile(io.FileIO):
 
         return sdna
 
-    def _load_struct(self, struct_name):
+    def _load_struct(self, struct_name, offset):
         """
         Load a struct according to the SDNA.
+
+        :param struct_name: The name of the structure type.
+        :param offset: The byte offset at which to begin loading.
+        :return The loaded structure.
         """
         fields = self._sdna["structs"][struct_name]
-        print(fields)
         return {}
 
     def read_header(self):
@@ -198,9 +243,13 @@ class Blendfile(io.FileIO):
         sdna_index = int.from_bytes(self.read(4), self.endianness)
         count = int.from_bytes(self.read(4), self.endianness)
 
-        struct_name = list(self._sdna["structs"])[sdna_index]
+        # Helper for creating a callback to load a given structure.
+        def create_loader(name, at_offset):
+            def load_struct():
+                return self._load_struct(name, at_offset)
+            return load_struct
 
-        # TODO load structs according to SDNA.
+        # The type of the structure.
+        name = list(self._sdna["structs"])[sdna_index]
         for _ in range(count):
-            translated = self._load_struct(struct_name)
-            yield translated
+            yield BlendStruct(create_loader(name, self.tell()), name)

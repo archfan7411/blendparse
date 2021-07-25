@@ -167,7 +167,7 @@ class Blendfile(io.FileIO):
         else:
             raise BlendDecodeError(
                 f"Invalid pointer size character {header.pointer_size}; " \
-                "must be '-' or '_'!")
+                f"must be {b'-'} or {b'_'}!")
         if header.endianness == bytes("v", "utf-8"):
             self.endianness = "little"
         elif header.endianess == bytes("V", "utf-8"):
@@ -175,7 +175,7 @@ class Blendfile(io.FileIO):
         else:
             raise BlendDecodeError(
                 f"Invalid endianness character {header.endianess}; "\
-                "must be 'v' or 'V'")
+                f"must be {b'v'} or {b'V'}")
         if not header.version.isdigit():
             raise BlendDecodeError(
                 f"Invalid version string {header.version}!")

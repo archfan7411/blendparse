@@ -1,10 +1,24 @@
 # A purpose-built class to parse certain information from .blend files.
 
+import collections
 import json
 import io
 import re
+import struct
 
-class BlendStruct:
+# The .blend format begins with a file header consisting of four fields.
+# A 7 byte identifier string, which will always be "BLENDER"
+# A single char representing pointer size: "-" for 8 byte and "_" for 4 byte.
+# A single char representing endianness: "v" for little endian and "V" for big.
+# A 3 byte version string. For example "293" indicates version 2.93.
+blend_header_struct = struct.Struct("7scc3s")
+BlendHeader = collections.namedtuple(
+   "FileHeader", ("identifier", "pointer_size", "endianness", "version"))
+
+class BlendDecodeError(Exception):
+    pass
+
+class BlendStruct(collections.abc.Mapping):
     """
     Read-only dict-like datatype representing a structure in a .blend file.
     """
@@ -52,6 +66,11 @@ class BlendStruct:
             self._structure = self._load_cb()
         return self._structure.__iter__()
 
+    def __len__(self):
+        if self._structure is None:
+            self._structure = self._load_cb()
+        return len(self._structure)
+
     def inspect(self):
         """
         Return a human readable representation of the struct.
@@ -69,11 +88,14 @@ class Blendfile(io.FileIO):
         super().__init__(filename, "rb")
         # Offset of first file block header.
         self._block_start = 12
-        self.read_header()
+        self._load_header()
         # Offsets of each file block by code.
         self._block_offsets = self._read_block_offsets()
         # SDNA structures by name.
         self._sdna = self._load_sdna()
+
+    def __str__(self):
+        return f"Blender file version {self.version}"
 
     def _read_c_string(self):
         """
@@ -119,6 +141,45 @@ class Blendfile(io.FileIO):
             size = self._sdna["tlen"][type]
             self.seek(size, io.SEEK_CUR)
             return type
+
+    def _load_header(self):
+        """
+        Unpack the file header.
+
+        Verifies the file identifier, and sets the pointer size, endianess, and
+        blender version.
+
+        :raises BlendDecodeError
+        """
+        self.seek(0)
+        size = blend_header_struct.size
+        # Does not decode bytes. Decoding bytes could raise an exception, so
+        # by validating the fields ourselves by comparing bytes, we can raise
+        # an exception with more useful information.
+        header = BlendHeader(*blend_header_struct.unpack_from(self.read(size)))
+
+        if header.identifier != bytes("BLENDER", "utf-8"):
+            raise BlendDecodeError("File identifier is not 'BLENDER'!")
+        if header.pointer_size == bytes("-", "utf-8"):
+            self.pointer_size = 8
+        elif header.pointer_size == bytes("_", "utf-8"):
+            self.pointer_size = 4
+        else:
+            raise BlendDecodeError(
+                f"Invalid pointer size character {header.pointer_size}; " \
+                "must be '-' or '_'!")
+        if header.endianness == bytes("v", "utf-8"):
+            self.endianness = "little"
+        elif header.endianess == bytes("V", "utf-8"):
+            self.endianness = "big"
+        else:
+            raise BlendDecodeError(
+                f"Invalid endianness character {header.endianess}; "\
+                "must be 'v' or 'V'")
+        if not header.version.isdigit():
+            raise BlendDecodeError(
+                f"Invalid version string {header.version}!")
+        self.version = "v{}.{}{}".format(*header.version.decode("utf-8"))
 
     def _read_block_offsets(self):
         """
@@ -251,21 +312,6 @@ class Blendfile(io.FileIO):
             is_ptr = name.startswith("*")
             structure[name] = self._construct_value(type, is_ptr, length)
         return structure
-
-    def read_header(self):
-        self.seek(0)
-
-        # File identifier, 8-byte string; should always be "BLENDER"
-        self.identifier = self.read(7).decode("utf-8")
-
-        # Pointer size, 1-byte char; '-' indicates 8 bytes, '_' indicates 4
-        self.pointer_size = 8 if self.read(1).decode("utf-8") == "-" else 4
-
-        # Endianness, 1-byte char; 'v' indicates little endian, 'V' indicates big
-        self.endianness = "little" if self.read(1).decode("utf-8") == "v" else "big"
-
-        # Blender version, 3-byte int; v2.93 is represented as 293, and so on
-        self.version = int(self.read(3))
 
     def get_blocks(self, match=""):
         """

@@ -6,15 +6,6 @@ import io
 import re
 import struct
 
-# The .blend format begins with a file header consisting of four fields.
-# A 7 byte identifier string, which will always be "BLENDER"
-# A single char representing pointer size: "-" for 8 byte and "_" for 4 byte.
-# A single char representing endianness: "v" for little endian and "V" for big.
-# A 3 byte version string. For example "293" indicates version 2.93.
-blend_header_struct = struct.Struct("7scc3s")
-BlendHeader = collections.namedtuple(
-   "FileHeader", ("identifier", "pointer_size", "endianness", "version"))
-
 class BlendDecodeError(Exception):
     pass
 
@@ -84,13 +75,46 @@ class BlendStruct(collections.abc.Mapping):
 
 # A class for opening and reading data from .blend files
 class Blendfile(io.FileIO):
+
+    # The .blend format begins with a file header consisting of four fields.
+    # A 7 byte identifier string, which will always be "BLENDER"
+    # A single char representing pointer size: "-" for 8 byte, "_" for 4 byte.
+    # A single char representing endianness: "v" for little, "V" for big.
+    # A 3 byte version string. For example "293" indicates version 2.93.
+    _blend_header_struct = struct.Struct("7scc3s")
+    _BlendHeader = collections.namedtuple(
+       "FileHeader", ("identifier", "pointer_size", "endianness", "version"))
+
+    # The file header is followed by a series of file blocks. Each file block
+    # begins with a header that contains 5 fields.
+    # A 4 byte code string which is the name of the file block.
+    # A 4 byte integer representing the size in bytes of the file block body.
+    # A pointer_size byte memory address (string); the old location in memory.
+    # A 4 byte integer representing the index of the struct definition
+    # in the SDNA struct array.
+    # A 4 byte integer representing the number of structs in the file block.
+    # The struct object depends on the pointer size read during initialization,
+    # so it will be initialized per instance at that time.
+    # The code is called blockcode to distinguish it from the code module.
+    _BlockHeader = collections.namedtuple(
+        "BlockHeader", ("blockcode", "size", "address", "sdna_index", "count"))
+
     def __init__(self, filename):
         super().__init__(filename, "rb")
         # Offset of first file block header.
         self._block_start = 12
         self._load_header()
+
+        # Endianess symbol for struct format string.
+        if self.endianness == "big":
+            endianness_format = ">"
+        else:
+            endianness_format = "<"
+        self._block_header_struct = struct.Struct(
+            f"{endianness_format}4si{self.pointer_size}sii")
+
         # Offsets of each file block by code.
-        self._block_offsets = self._read_block_offsets()
+        self._block_offsets = self._read_block_headers()
         # SDNA structures by name.
         self._sdna = self._load_sdna()
 
@@ -152,11 +176,12 @@ class Blendfile(io.FileIO):
         :raises BlendDecodeError
         """
         self.seek(0)
-        size = blend_header_struct.size
+        header_size = self._blend_header_struct.size
         # Does not decode bytes. Decoding bytes could raise an exception, so
         # by validating the fields ourselves by comparing bytes, we can raise
         # an exception with more useful information.
-        header = BlendHeader(*blend_header_struct.unpack_from(self.read(size)))
+        header = self._BlendHeader(
+            *self._blend_header_struct.unpack_from(self.read(header_size)))
 
         if header.identifier != bytes("BLENDER", "utf-8"):
             raise BlendDecodeError("File identifier is not 'BLENDER'!")
@@ -181,28 +206,39 @@ class Blendfile(io.FileIO):
                 f"Invalid version string {header.version}!")
         self.version = "v{}.{}{}".format(*header.version.decode("utf-8"))
 
-    def _read_block_offsets(self):
+    def _read_block_headers(self):
         """
-        Cache the offset to each file block.
+        Read the header of each file block and store the offset of its body.
+
+        :return A dict of file block codes mapped to tuples of the format
+        (_BlockHeader, byte_offset).
         """
 
         block_offsets = {}
         self.seek(self._block_start)
         while True:
-            offset = self.tell()
-            # File block code; identifies type of data
-            block_code = self.read(4).decode("utf-8")
-            # Empty string indicates EOF.
-            if block_code == "":
+            # If no bytes are read we are at EOF.
+            header_bytes = self.read(self._block_header_struct.size)
+            if len(header_bytes) == 0:
                 break
-            block_offsets[block_code] = offset
-            # Size of file block, after this header
-            block_size = int.from_bytes(self.read(4), self.endianness)
 
-            # Skip rest of file header.
-            self.seek(self.pointer_size + 8, io.SEEK_CUR)
-            # Skip to next file block.
-            self.seek(block_size, io.SEEK_CUR)
+            # Header will be read and then recreated with decoded values.
+            header = self._BlockHeader(
+                *self._block_header_struct.unpack_from(header_bytes))
+            try:
+                blockcode = header.blockcode.decode("utf-8")
+            except UnicodeDecodeError as e:
+                # Workaround to avoid having "During handling of..." error.
+                raise BlendDecodeError(
+                    f"Can't decode block code {header.blockcode}!") from None
+            header_decoded = self._BlockHeader(
+                blockcode, header.size, header.address,
+                header.sdna_index, header.count)
+
+            # Beginning of file block body.
+            offset = self.tell()
+            block_offsets[blockcode] = (header_decoded, offset)
+            self.seek(header_decoded.size, io.SEEK_CUR)
 
         return block_offsets
 
@@ -211,19 +247,13 @@ class Blendfile(io.FileIO):
         Load each SDNA structure.
         """
         try:
-            offset = self._block_offsets["DNA1"]
+            offset = self._block_offsets["DNA1"][1]
         except KeyError:
-            raise ValueError("Missing DNA1 file block.")
+            raise ValueError("Missing DNA1 file block.") from None
 
         sdna = {}
         # Skip file block header.
         self.seek(offset)
-        # File block code.
-        self.seek(4, io.SEEK_CUR)
-        # Size of file block after this header.
-        block_size = int.from_bytes(self.read(4), self.endianness)
-        self.seek(8 + self.pointer_size, io.SEEK_CUR)
-        block_end = offset + block_size
 
         # Identifier; should be "SDNA"
         self.seek(4, io.SEEK_CUR)
@@ -325,15 +355,15 @@ class Blendfile(io.FileIO):
         block.
         """
         # Invoking the load_block() closure will load the file block at offset.
-        def create_loader(at_offset):
+        def create_loader(header, at_offset):
             def load_block():
-                return self._load_block(at_offset)
+                return self._load_block(header, at_offset)
             return load_block
 
         matched_blocks = {}
-        for identifier, offset in self._block_offsets.items():
+        for identifier, header in self._block_offsets.items():
             if identifier.startswith(match):
-                matched_blocks[identifier] = create_loader(offset)
+                matched_blocks[identifier] = create_loader(*header)
         return matched_blocks
 
     # Helper for creating a callback to load a given structure.
@@ -342,11 +372,12 @@ class Blendfile(io.FileIO):
             return self._load_struct(name, at_offset)
         return load_struct
 
-    def _load_block(self, offset):
+    def _load_block(self, header, offset):
         """
         Load a file block at a given offset to the beginning of the blend file.
 
-        :param offset: The offset of the file block.
+        :param header: The file block header.
+        :param offset: The byte offset to the file block body.
         :return Generator that yields dictionaries, each representing a struct.
         """
         # We might allow loading cached blocks after the file is closed, so
@@ -354,12 +385,9 @@ class Blendfile(io.FileIO):
         if self.closed:
             raise ValueError("I/O operation on a closed file.")
 
-        # Grab SDNA index and struct count from file block header.
-        self.seek(offset + 4 + 4 + self.pointer_size)
-        sdna_index = int.from_bytes(self.read(4), self.endianness)
-        count = int.from_bytes(self.read(4), self.endianness)
-
         # The type of the structure.
-        name = list(self._sdna["structs"])[sdna_index]
-        for _ in range(count):
+        name = list(self._sdna["structs"])[header.sdna_index]
+        for _ in range(header.count):
             yield BlendStruct(self._struct_loader(name, self.tell()), name)
+
+__all__ = ("BlendStruct", "Blendfile")
